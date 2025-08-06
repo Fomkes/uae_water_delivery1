@@ -4,7 +4,6 @@ import axios from 'axios';
 
 export const runtime = 'nodejs';
 
-// CORS headers
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
@@ -18,7 +17,6 @@ export async function OPTIONS(request: NextRequest) {
   });
 }
 
-// Интерфейс для спарсенного товара
 interface ParsedProduct {
   name: string;
   nameAr?: string;
@@ -46,7 +44,6 @@ interface ParsedProduct {
   stockQuantity: number;
 }
 
-// Конфигурация парсеров
 const PARSER_CONFIG = {
   timeout: 30000,
   maxRedirects: 5,
@@ -61,36 +58,8 @@ const PARSER_CONFIG = {
   }
 };
 
-// Функция для получения HTML с страницы
-async function fetchPageHTML(url: string): Promise<string> {
-  try {
-    console.log(`🔍 Fetching: ${url}`);
-
-    const response = await axios.get(url, {
-      timeout: PARSER_CONFIG.timeout,
-      maxRedirects: PARSER_CONFIG.maxRedirects,
-      headers: PARSER_CONFIG.headers,
-      validateStatus: (status: number) => status < 400,
-    });
-
-    if (!response.data) {
-      throw new Error('No HTML content received');
-    }
-
-    console.log(`✅ HTML fetched successfully (${response.data.length} chars)`);
-    return response.data;
-  } catch (error) {
-    console.error(`❌ Error fetching HTML from ${url}:`, error);
-    throw new Error(`Failed to fetch page: ${error instanceof Error ? error.message : 'Unknown error'}`);
-  }
-}
-
-// Utility функции
 function cleanText(text: string): string {
-  return text
-    .replace(/\s+/g, ' ')
-    .replace(/\n+/g, ' ')
-    .trim();
+  return text.replace(/\s+/g, ' ').replace(/\n+/g, ' ').trim();
 }
 
 function extractPrice(text: string): number {
@@ -120,14 +89,140 @@ function detectCategory(name: string): string {
   return 'Natural Water';
 }
 
-// Универсальный парсер
-async function parseProducts(html: string, baseUrl: string): Promise<ParsedProduct[]> {
+function detectCategoryAr(name: string): string {
+  const category = detectCategory(name);
+  const categoryMap: { [key: string]: string } = {
+    'Sparkling Water': 'المياه الفوارة',
+    'Alkaline Water': 'المياه القلوية',
+    'Family Packs': 'العبوات العائلية',
+    'Sports Water': 'مياه رياضية',
+    'Enhanced Water': 'المياه المُحسنة',
+    'Distilled Water': 'المياه المقطرة',
+    'Natural Water': 'المياه الطبيعية'
+  };
+  return categoryMap[category] || 'المياه الطبيعية';
+}
+
+async function fetchPageHTML(url: string): Promise<string> {
+  try {
+    console.log(`🔍 Fetching: ${url}`);
+
+    const response = await axios.get(url, {
+      timeout: PARSER_CONFIG.timeout,
+      maxRedirects: PARSER_CONFIG.maxRedirects,
+      headers: PARSER_CONFIG.headers,
+      validateStatus: (status: number) => status < 400,
+    });
+
+    if (!response.data) {
+      throw new Error('No HTML content received');
+    }
+
+    console.log(`✅ HTML fetched successfully (${response.data.length} chars)`);
+    return response.data;
+  } catch (error) {
+    console.error(`❌ Error fetching HTML from ${url}:`, error);
+    throw new Error(`Failed to fetch page: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+}
+
+async function parseCarrefourUAE(html: string, baseUrl: string): Promise<ParsedProduct[]> {
   const $ = cheerio.load(html);
   const products: ParsedProduct[] = [];
 
-  console.log('🔍 Parsing products...');
+  console.log('🏪 Parsing Carrefour UAE...');
 
-  // Общие селекторы для товаров
+  const productSelectors = [
+    '.product-item',
+    '.product-card',
+    '[data-testid="product-card"]',
+    '.cs-product-tile',
+    '.product-grid-item'
+  ];
+
+  let productElements = $();
+  for (const selector of productSelectors) {
+    const elements = $(selector);
+    if (elements.length > 0) {
+      productElements = elements;
+      console.log(`Found ${elements.length} products using selector: ${selector}`);
+      break;
+    }
+  }
+
+  productElements.each((index, element) => {
+    if (products.length >= 20) return false;
+
+    try {
+      const $el = $(element);
+
+      const name = cleanText(
+        $el.find('h3, h4, .product-title, .product-name, [data-testid="product-name"]').first().text() ||
+        $el.find('a').attr('title') ||
+        ''
+      );
+
+      if (!name || name.length < 3) return;
+
+      const priceText = $el.find('.price, .product-price, [data-testid="price"]').text();
+      const price = extractPrice(priceText);
+
+      if (!price || price <= 0) return;
+
+      const imgSrc = $el.find('img').first().attr('src') || $el.find('img').first().attr('data-src') || '';
+      let imageUrl = '';
+      if (imgSrc) {
+        imageUrl = imgSrc.startsWith('//') ? `https:${imgSrc}` :
+                   imgSrc.startsWith('/') ? `https://www.carrefouruae.com${imgSrc}` : imgSrc;
+      }
+
+      const description = cleanText(
+        $el.find('.product-description, .product-summary').text() ||
+        `High quality ${name.toLowerCase()} from Carrefour UAE`
+      );
+
+      const product: ParsedProduct = {
+        name,
+        nameAr: name,
+        description,
+        descriptionAr: `${name} عالي الجودة من كارفور الإمارات`,
+        price,
+        originalPrice: undefined,
+        image: imageUrl || '/uploads/products/default-water.jpg',
+        images: imageUrl ? [imageUrl] : ['/uploads/products/default-water.jpg'],
+        category: detectCategory(name),
+        categoryAr: detectCategoryAr(name),
+        size: name.match(/(\d+(?:\.\d+)?\s*(?:ml|l|liter|litre))/i)?.[1] || 'Medium',
+        sizeAr: 'متوسط',
+        volume: name.match(/(\d+(?:\.\d+)?\s*(?:ml|l|liter|litre))/i)?.[1] || '500ml',
+        volumeAr: '500 مل',
+        origin: 'UAE',
+        originAr: 'الإمارات',
+        features: ['Natural', 'High Quality', 'BPA Free'],
+        featuresAr: ['طبيعي', 'جودة عالية', 'خالي من BPA'],
+        rating: 4.5 + Math.random() * 0.5,
+        reviews: Math.floor(Math.random() * 100) + 10,
+        slug: generateSlug(name),
+        sourceUrl: baseUrl,
+        inStock: true,
+        stockQuantity: Math.floor(Math.random() * 50) + 25
+      };
+
+      products.push(product);
+    } catch (error) {
+      console.error('Error parsing Carrefour product:', error);
+    }
+  });
+
+  return products;
+}
+
+async function parseUniversalSite(html: string, baseUrl: string): Promise<ParsedProduct[]> {
+  const $ = cheerio.load(html);
+  const products: ParsedProduct[] = [];
+
+  console.log('🔍 Parsing universal site...');
+
   const productSelectors = [
     '[class*="product"]',
     '[class*="item"]',
@@ -150,7 +245,6 @@ async function parseProducts(html: string, baseUrl: string): Promise<ParsedProdu
     try {
       const $el = $(element);
 
-      // Ищем название продукта
       const nameSelectors = ['h1', 'h2', 'h3', 'h4', '.title', '[class*="name"]', '[class*="title"]'];
       let name = '';
       for (const selector of nameSelectors) {
@@ -160,7 +254,6 @@ async function parseProducts(html: string, baseUrl: string): Promise<ParsedProdu
 
       if (!name || name.length < 3) return;
 
-      // Ищем цену
       const priceSelectors = ['.price', '[class*="price"]', '[class*="cost"]', '[class*="amount"]'];
       let priceText = '';
       for (const selector of priceSelectors) {
@@ -171,9 +264,8 @@ async function parseProducts(html: string, baseUrl: string): Promise<ParsedProdu
       const price = extractPrice(priceText);
       if (!price || price <= 0) return;
 
-      // Ищем изображение
       const imgSrc = $el.find('img').first().attr('src') || $el.find('img').first().attr('data-src') || '';
-      let imageUrl = '/uploads/products/default-water.jpg';
+      let imageUrl = '';
       if (imgSrc) {
         if (imgSrc.startsWith('//')) {
           imageUrl = `https:${imgSrc}`;
@@ -194,14 +286,14 @@ async function parseProducts(html: string, baseUrl: string): Promise<ParsedProdu
         descriptionAr: `${name} عالي الجودة متوفر أونلاين. منتج مميز لاحتياجاتك اليومية.`,
         price,
         originalPrice: undefined,
-        image: imageUrl,
-        images: [imageUrl],
+        image: imageUrl || '/uploads/products/default-water.jpg',
+        images: imageUrl ? [imageUrl] : ['/uploads/products/default-water.jpg'],
         category: detectCategory(name),
-        categoryAr: 'المياه الطبيعية',
+        categoryAr: detectCategoryAr(name),
         size: name.match(/(\d+(?:\.\d+)?\s*(?:ml|l|liter|litre))/i)?.[1] || 'Medium',
         sizeAr: 'متوسط',
         volume: name.match(/(\d+(?:\.\d+)?\s*(?:ml|l|liter|litre))/i)?.[1] || '500ml',
-        volumeAr: '500 مل',
+        volumeAr: '500 мл',
         origin: 'UAE',
         originAr: 'الإمارات',
         features: ['Quality Product', 'Online Available'],
@@ -223,7 +315,28 @@ async function parseProducts(html: string, baseUrl: string): Promise<ParsedProdu
   return products;
 }
 
-// POST endpoint для парсинга
+async function parseProductsFromURL(url: string): Promise<ParsedProduct[]> {
+  try {
+    console.log(`🔍 Starting to parse: ${url}`);
+
+    const html = await fetchPageHTML(url);
+    let products: ParsedProduct[] = [];
+
+    if (url.includes('carrefouruae.com') || url.includes('carrefour')) {
+      products = await parseCarrefourUAE(html, url);
+    } else {
+      products = await parseUniversalSite(html, url);
+    }
+
+    console.log(`✅ Successfully parsed ${products.length} products`);
+    return products;
+
+  } catch (error) {
+    console.error('❌ Error in parseProductsFromURL:', error);
+    throw error;
+  }
+}
+
 export async function POST(request: NextRequest) {
   try {
     const { url, category, maxProducts = 20 } = await request.json();
@@ -235,13 +348,18 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    try {
+      new URL(url);
+    } catch {
+      return NextResponse.json(
+        { error: 'Invalid URL format' },
+        { status: 400, headers: corsHeaders }
+      );
+    }
+
     console.log(`🚀 Starting parsing for: ${url}`);
 
-    // Получаем HTML
-    const html = await fetchPageHTML(url);
-
-    // Парсим товары
-    const products = await parseProducts(html, url);
+    const products = await parseProductsFromURL(url);
 
     if (products.length === 0) {
       return NextResponse.json(
@@ -253,14 +371,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Применяем выбранную категорию если указана
     if (category) {
       products.forEach(product => {
         product.category = category;
+        product.categoryAr = detectCategoryAr(category);
       });
     }
 
-    // Ограничиваем количество товаров
     const limitedProducts = products.slice(0, maxProducts);
 
     console.log(`✅ Successfully parsed ${limitedProducts.length} products from ${url}`);
